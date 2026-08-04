@@ -33,7 +33,7 @@ class AuthController extends Controller
         }
 
         $email = strtolower(trim($request->input('email')));
-
+        // Check for existing username, email, and contact info
         if (User::findByUsername($request->input('username'))) {
             return back()->withErrors(['username' => 'This username is already taken. Please choose a different one.']);
         }
@@ -67,7 +67,8 @@ class AuthController extends Controller
     {
         return view('auth.login');
     }
-
+    //login method with 2FA implementation
+    //login credential validate first then generate OTP and send to email, then redirect to OTP verification page
     public function authenticate(Request $request)
     {
         $request->validate([
@@ -94,12 +95,12 @@ class AuthController extends Controller
             ]
         );
 
-        $request->session()->put('pending_2fa_user', $user->user_id);
+        $request->session()->put('pending_2fa_user', $user->user_id); // Store user ID in session for 2FA verification temporarily
         $request->session()->put('pending_2fa_email', $email);
         $request->session()->put('otp_resend_available_at', now()->addSeconds(60));
 
         $displayName = explode('@', $email)[0] ?: 'there';
-
+        // Send OTP email
         try {
             Mail::to($email)->send(new TwoFactorOtpMail($otp, ucfirst($displayName)));
         } catch (\Exception $e) {
@@ -117,14 +118,14 @@ class AuthController extends Controller
 
         $userId = $request->session()->get('pending_2fa_user');
         $verificationEmail = $request->session()->get('pending_2fa_email');
-
+        // Check if there's an active OTP for the user and calculate time remaining for display and resend logic
         $otpRecord = Otp::where('user_id', $userId)
             ->where('is_used', false)
             ->orderByDesc('generated_at')
             ->first();
 
         $timeRemaining = 0;
-        if ($otpRecord) {
+        if ($otpRecord) { // Calculate time remaining until OTP expires
             $timeRemaining = now()->diffInSeconds($otpRecord->expiry_time, false);
             if ($timeRemaining < 0) {
                 $timeRemaining = 0;
@@ -133,7 +134,7 @@ class AuthController extends Controller
 
         $resendAvailableAt = $request->session()->get('otp_resend_available_at', now());
         $resendCooldown = max(0, now()->diffInSeconds($resendAvailableAt, false));
-        $showResend = $timeRemaining <= 0;
+        $showResend = $timeRemaining <= 0; //resend button show only when OTP is expired, not based on cooldown, because user should be able to request new OTP immediately after expiration without waiting for cooldown if they want to. Cooldown only prevents multiple requests while OTP is still valid.
 
         return view('auth.verify', [
             'verificationEmail' => $verificationEmail,

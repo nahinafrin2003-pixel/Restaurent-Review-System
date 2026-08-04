@@ -16,7 +16,7 @@ class ReviewController extends Controller
         $reviews = Review::where('user_id', $user->user_id)
             ->whereIn('status', ['pending', 'approved'])
             ->get();
-
+        // Verify integrity of each review before displaying
         foreach ($reviews as $review) {
             if (!$review->verifyIntegrity()) {
                 \Log::warning('Review integrity check failed for review ' . $review->review_id);
@@ -29,7 +29,7 @@ class ReviewController extends Controller
     public function dashboard(Request $request)
     {
         $user = $request->attributes->get('auth_user');
-
+        // Admins see all pending, wait, and approved reviews; regular users see only their approved reviews and activity
         if ($user->isAdmin()) {
             $pendingReviews = Review::where('status', 'pending')->latest()->limit(10)->get();
             $waitReviews = Review::where('status', 'wait')->latest()->limit(10)->get();
@@ -47,7 +47,7 @@ class ReviewController extends Controller
             $approvedReviews = Review::where('user_id', $user->user_id)
                 ->where('status', 'approved')
                 ->latest()
-                ->limit(10)
+                ->limit(10) // Only show the latest 10 approved reviews for regular users
                 ->get();
 
             return view('dashboard', [
@@ -206,7 +206,11 @@ class ReviewController extends Controller
 
         return view('reviews.show', ['review' => $review]);
     }
-
+    // Admin functions
+    /**
+     * Returns the list of pending reviews for admin review.
+     * Only administrators can access this route.
+     */
     public function pendingRequests(Request $request)
     {
         $admin = $request->attributes->get('auth_user');

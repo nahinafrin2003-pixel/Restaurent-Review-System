@@ -33,6 +33,21 @@ class PostedReview extends Model
         return $this->belongsTo(User::class, 'user_id', 'user_id');
     }
 
+    public static function createFromReview(Review $review): self
+    {
+        if ($review->status !== 'approved') {
+            throw new \LogicException('Only approved reviews may be stored in posted_reviews.');
+        }
+
+        return static::firstOrCreate([
+            'review_id' => $review->review_id,
+        ], [
+            'user_id' => $review->user_id,
+            'encrypted_review' => json_encode($review->toArray()),
+            'posted_at' => now(),
+        ]);
+    }
+
     public function setEncryptedReviewAttribute(string $value): void
     {
         $this->attributes['encrypted_review'] = app(KeyManager::class)->encryptUserField($value);

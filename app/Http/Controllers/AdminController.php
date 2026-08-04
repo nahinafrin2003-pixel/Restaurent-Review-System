@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AdminAction;
 use App\Models\PostedReview;
 use App\Models\Review;
+use Illuminate\Database\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
 
@@ -21,24 +22,22 @@ class AdminController extends Controller
         $review = Review::findOrFail($reviewId);
 
         // Check admin limit
-        // Approve review
-        $review->update(['status' => 'approved']);
+        DB::transaction(function () use ($review, $admin) {
+            if ($review->status !== 'approved') {
+                $review->update(['status' => 'approved']);
+            }
 
-        // Create posted review (store encrypted)
-        PostedReview::create([
-            'review_id' => $review->review_id,
-            'user_id' => $review->user_id,
-            'encrypted_review' => json_encode($review->toArray()),
-            'posted_at' => now(),
-        ]);
+            // Create posted review only once for approved reviews
+            PostedReview::createFromReview($review);
 
-        // Log admin action
-        AdminAction::create([
-            'admin_id' => $admin->user_id,
-            'review_id' => $review->review_id,
-            'status' => 'approved',
-            'action_time' => now(),
-        ]);
+            // Log admin action
+            AdminAction::create([
+                'admin_id' => $admin->user_id,
+                'review_id' => $review->review_id,
+                'status' => 'approved',
+                'action_time' => now(),
+            ]);
+        });
 
         // Fill any freed pending slots from the wait queue
         $pendingCount = Review::where('status', 'pending')->count();
@@ -52,6 +51,11 @@ class AdminController extends Controller
         return back()->with('status', 'Review approved.');
     }
 
+    /**
+     * Handles admin rejection of a review.
+     * Updates review status to rejected, removes any posted review copy,
+     * logs the admin action, notifies the user by email, and refills the pending queue.
+     */
     public function rejectReview(Request $request, $reviewId)
     {
         $admin = $request->attributes->get('auth_user');
@@ -62,16 +66,21 @@ class AdminController extends Controller
 
         $review = Review::findOrFail($reviewId);
 
-        // Reject review
-        $review->update(['status' => 'rejected']);
+        DB::transaction(function () use ($review, $admin) {
+            // Reject review
+            $review->update(['status' => 'rejected']);
 
-        // Log admin action
-        AdminAction::create([
-            'admin_id' => $admin->user_id,
-            'review_id' => $review->review_id,
-            'status' => 'rejected',
-            'action_time' => now(),
-        ]);
+            // Remove any previously posted version when the review is rejected
+            PostedReview::where('review_id', $review->review_id)->delete();
+
+            // Log admin action
+            AdminAction::create([
+                'admin_id' => $admin->user_id,
+                'review_id' => $review->review_id,
+                'status' => 'rejected',
+                'action_time' => now(),
+            ]);
+        });
 
         // Send notification email to user
         $user = $review->user;
