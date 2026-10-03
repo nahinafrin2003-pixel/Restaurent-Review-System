@@ -424,8 +424,11 @@ class BigInteger
             throw new Exception('Prime bit length must be at least 16.');
         }
 
+        // Force the two top bits so p*q always has the full 2*bits length.
+        $top = self::add(self::pow2($bits - 1), self::pow2($bits - 2));
+
         do {
-            $candidate = self::randomBigInt($bits);
+            $candidate = self::add($top, self::mod(self::randomBigInt($bits), self::pow2($bits - 2)));
 
             if (self::isEven($candidate)) {
                 $candidate = self::add($candidate, '1');

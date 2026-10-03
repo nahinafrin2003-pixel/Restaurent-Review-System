@@ -83,7 +83,7 @@ class RSA
         $format = $payload['format'] ?? 'rsa-plain';
         $n = BigInteger::fromHex($privateKey['n']);
         $d = BigInteger::fromHex($privateKey['d']);
-        $k = (int) floor((strlen(BigInteger::toHex($n)) / 2));
+        $k = self::keyByteSize($privateKey);   // must match the size used by encrypt()
         $plaintext = '';
 
         foreach ($payload['blocks'] as $blockHex) {
@@ -103,7 +103,7 @@ class RSA
 
     protected static function sha256(string $data): string
     {
-        return hash('sha256', $data, true);
+        return \App\Services\Crypto\SHA256::raw($data);
     }
 
     protected static function mgf1(string $seed, int $length): string

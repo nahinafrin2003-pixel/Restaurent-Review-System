@@ -7,6 +7,7 @@ use App\Services\Crypto\Asymmetric\ECC;
 use App\Services\Crypto\Asymmetric\RSA;
 use Exception;
 
+
 class KeyManager
 {
     protected static $keysEnsured = false;
@@ -283,4 +284,142 @@ class KeyManager
         return $record;
     }
 
+    /* ------------------------------------------------------------------
+     * Generic helpers used by the complaint module (and new code paths)
+     * ------------------------------------------------------------------ */
+
+    /** Per-request memo so the same ciphertext is never decrypted twice. */
+    protected static array $memo = [];
+
+    /** SHA-256 lookup hash for encrypted columns (custom implementation). */
+    public static function lookupHash(string $value): string
+    {
+        return SHA256::hash($value);
+    }
+
+    /** RSA-OAEP encrypt with the active key. */
+    public function encrypt(string $plaintext): string
+    {
+        return RSA::encrypt($plaintext, $this->getActiveRsaPublic());
+    }
+
+    /** RSA-OAEP decrypt, falling back to rotated keys (OAEP integrity check tells us which key fits). */
+    public function decrypt(?string $ciphertext): string
+    {
+        if ($ciphertext === null || $ciphertext === '') {
+            return '';
+        }
+        if (isset(self::$memo[$ciphertext])) {
+            return self::$memo[$ciphertext];
+        }
+
+        $candidates = [$this->getActiveRsaPrivate()];
+        foreach (KeyPair::where('key_type', 'rsa')->where('status', 'rotated')->orderByDesc('key_id')->get() as $record) {
+            $decoded = json_decode($record->private_key, true);
+            if (is_array($decoded)) {
+                $candidates[] = $decoded;
+            }
+        }
+
+        foreach ($candidates as $key) {
+            try {
+                return self::$memo[$ciphertext] = RSA::decrypt($ciphertext, $key);
+            } catch (\Throwable $e) {
+                continue;
+            }
+        }
+
+        throw new Exception('Unable to decrypt RSA field with any known key.');
+    }
+
+    /** EC-ElGamal (ECIES-style) hybrid encryption with the active secp256k1 key. */
+    public function seal(string $plaintext): string
+    {
+        return ECC::seal($plaintext, $this->getActiveEccPublic());
+    }
+
+    public function open(?string $ciphertext): string
+    {
+        if ($ciphertext === null || $ciphertext === '') {
+            return '';
+        }
+        if (isset(self::$memo[$ciphertext])) {
+            return self::$memo[$ciphertext];
+        }
+
+        $keys = [$this->getActiveEccPrivate()];
+        foreach (KeyPair::where('key_type', 'ecc')->where('status', 'rotated')->orderByDesc('key_id')->get() as $record) {
+            $decoded = json_decode($record->private_key, true);
+            if (is_string($decoded)) {
+                $keys[] = $decoded;
+            }
+        }
+
+        foreach ($keys as $key) {
+            try {
+                return self::$memo[$ciphertext] = ECC::open($ciphertext, $key);
+            } catch (\Throwable $e) {
+                continue;
+            }
+        }
+
+        throw new Exception('Unable to open ECIES field with any known key.');
+    }
+
+    /** ECDSA-style signature; records which key signed so rotation does not break verification. */
+    public function sign(string $message): array
+    {
+        $record = $this->getActiveKeyPair('ecc');
+        $signature = ECC::sign($message, $this->getActiveEccPrivate());
+        $signature['kid'] = $record->key_id;
+
+        return $signature;
+    }
+
+    public function verify(string $message, $signature): bool
+    {
+        if (is_string($signature)) {
+            $signature = json_decode($signature, true);
+        }
+        if (! is_array($signature) || ! isset($signature['r'], $signature['s'])) {
+            return false;
+        }
+
+        $query = KeyPair::where('key_type', 'ecc');
+        if (! empty($signature['kid'])) {
+            $query->where('key_id', $signature['kid']);
+        } else {
+            $query->orderByRaw("case when status = 'active' then 0 else 1 end")->orderByDesc('key_id');
+        }
+
+        foreach ($query->get() as $record) {
+            $public = json_decode($record->public_key, true);
+            if (is_array($public) && ECC::verify($message, $signature, $public)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function mac(string $message): string
+    {
+        return HMAC::sign($message, (string) config('crypto.root_secret'));
+    }
+
+    public function verifyMac(string $message, ?string $mac): bool
+    {
+        return $mac !== null && $mac !== '' && HMAC::verify($message, (string) config('crypto.root_secret'), $mac);
+    }
+
+    public function activeKeySummary(): array
+    {
+        return KeyPair::orderByDesc('key_id')->get()->map(fn ($k) => [
+            'id' => $k->key_id,
+            'type' => strtoupper($k->key_type),
+            'status' => $k->status,
+            'created_at' => $k->created_at,
+            'fingerprint' => substr(SHA256::hash($k->public_key), 0, 32),
+        ])->all();
+    }
 }

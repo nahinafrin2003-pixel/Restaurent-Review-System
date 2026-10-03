@@ -11,7 +11,14 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->web(append: [
+            \App\Http\Middleware\ResolveUser::class,
+        ]);
+        $middleware->alias([
+            'auth.session' => \App\Http\Middleware\AuthenticateSession::class,
+            'guest.session' => \App\Http\Middleware\RedirectIfAuthenticatedSession::class,
+            'role' => \App\Http\Middleware\RequireRole::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

@@ -2,236 +2,189 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Restaurant;
 use App\Models\Review;
 use App\Models\UserActivity;
+use App\Services\AuditLogger;
+use App\Support\Districts;
 use Illuminate\Http\Request;
 
 class ReviewController extends Controller
 {
-    private $districts = ['Dhaka', 'Chittagong', 'Khulna', 'Rajshahi', 'Sylhet', 'Barisal', 'Rangpur', 'Mymensingh'];
+    public const MAX_PENDING = 10;      // moderation queue cap; overflow is waitlisted
+    public const REVIEWS_PER_WINDOW = 5; // then a 24h cooldown
+    public const MAX_EDITS = 3;
 
     public function index(Request $request)
     {
         $user = $request->attributes->get('auth_user');
-        $reviews = Review::where('user_id', $user->user_id)
-            ->whereIn('status', ['pending', 'approved'])
-            ->get();
-        // Verify integrity of each review before displaying
+        $reviews = Review::where('user_id', $user->user_id)->orderByDesc('review_id')->get();
+
+        $integrity = [];
         foreach ($reviews as $review) {
-            if (!$review->verifyIntegrity()) {
-                \Log::warning('Review integrity check failed for review ' . $review->review_id);
+            $integrity[$review->review_id] = $review->verifyIntegrity();
+            if (! $integrity[$review->review_id]) {
+                AuditLogger::log('review.integrity_failed', $review);
             }
         }
 
-        return view('reviews.index', compact('reviews'));
-    }
-
-    public function dashboard(Request $request)
-    {
-        $user = $request->attributes->get('auth_user');
-        // Admins see all pending, wait, and approved reviews; regular users see only their approved reviews and activity
-        if ($user->isAdmin()) {
-            $pendingReviews = Review::where('status', 'pending')->latest()->limit(10)->get();
-            $waitReviews = Review::where('status', 'wait')->latest()->limit(10)->get();
-            $approvedReviews = Review::where('status', 'approved')->latest()->limit(10)->get();
-
-            return view('dashboard', [
-                'user' => $user,
-                'pendingReviews' => $pendingReviews,
-                'waitReviews' => $waitReviews,
-                'approvedReviews' => $approvedReviews,
-                'districts' => $this->districts,
-            ]);
-        } else {
-            $userActivity = UserActivity::where('user_id', $user->user_id)->first();
-            $approvedReviews = Review::where('user_id', $user->user_id)
-                ->where('status', 'approved')
-                ->latest()
-                ->limit(10) // Only show the latest 10 approved reviews for regular users
-                ->get();
-
-            return view('dashboard', [
-                'user' => $user,
-                'approvedReviews' => $approvedReviews,
-                'userActivity' => $userActivity,
-                'districts' => $this->districts,
-            ]);
-        }
+        return view('reviews.index', [
+            'reviews' => $reviews,
+            'integrity' => $integrity,
+            'activity' => UserActivity::firstOrCreate(['user_id' => $user->user_id], ['remaining_reviews' => self::REVIEWS_PER_WINDOW]),
+        ]);
     }
 
     public function create(Request $request)
     {
-        return view('reviews.create', ['districts' => $this->districts]);
+        $user = $request->attributes->get('auth_user');
+
+        return view('reviews.create', [
+            'restaurants' => Restaurant::orderBy('name')->get(['id', 'name', 'district']),
+            'selectedRestaurant' => $request->query('restaurant_id'),
+            'activity' => UserActivity::firstOrCreate(['user_id' => $user->user_id], ['remaining_reviews' => self::REVIEWS_PER_WINDOW]),
+        ]);
     }
 
     public function store(Request $request)
     {
         $user = $request->attributes->get('auth_user');
 
-        $request->validate([
-            'restaurant_name' => 'required|string|max:200',
-            'review_text' => 'required|string|max:1000',
+        $data = $request->validate([
+            'restaurant_id' => 'required|exists:restaurants,id',
+            'review_text' => 'required|string|min:10|max:1000',
             'review_score' => 'required|integer|min:1|max:10',
-            'location' => 'required|string|max:200',
-            'city' => 'required|string|in:' . implode(',', $this->districts),
+            'location' => 'nullable|string|max:200',
         ]);
 
-        // Determine review status based on current pending queue size
-        $pendingCount = Review::where('status', 'pending')->count();
-        $queueStatus = $pendingCount >= 10 ? 'wait' : 'pending';
+        $activity = UserActivity::firstOrCreate(['user_id' => $user->user_id], ['remaining_reviews' => self::REVIEWS_PER_WINDOW]);
 
-        // Check user activity and rate limiting
-        $userActivity = UserActivity::where('user_id', $user->user_id)->first();
-
-        if (!$userActivity->canPostReview()) {
-            $timeUntil = $userActivity->getTimeUntilNextReview();
-            return back()->withErrors(['general' => 'You have reached the daily limit. Try again after ' . $timeUntil]);
+        // Cooldown elapsed → reset the allowance.
+        if ($activity->cooldown_end_time && now()->greaterThanOrEqualTo($activity->cooldown_end_time)) {
+            $activity->update(['cooldown_end_time' => null, 'remaining_reviews' => self::REVIEWS_PER_WINDOW]);
+        }
+        if (! $activity->canPostReview()) {
+            return back()->withInput()->withErrors(['general' => 'You have used your ' . self::REVIEWS_PER_WINDOW . ' reviews. You can post again ' . $activity->cooldown_end_time->diffForHumans() . '.']);
         }
 
-        // Create review
+        $restaurant = Restaurant::findOrFail($data['restaurant_id']);
+        $queueStatus = Review::where('status', 'pending')->count() >= self::MAX_PENDING ? 'wait' : 'pending';
+
         $review = Review::create([
             'user_id' => $user->user_id,
-            'restaurant_name' => $request->input('restaurant_name'),
-            'review_text' => $request->input('review_text'),
-            'review_score' => (int) $request->input('review_score'),
-            'location' => $request->input('location'),
-            'city' => $request->input('city'),
+            'restaurant_id' => $restaurant->id,
+            'restaurant_name' => $restaurant->name,
+            'review_text' => $data['review_text'],
+            'review_score' => (int) $data['review_score'],
+            'location' => $data['location'] ?: $restaurant->address,
+            'city' => $restaurant->district,
             'status' => $queueStatus,
             'edit_count' => 0,
-            'max_edit_limit' => 3,
+            'max_edit_limit' => self::MAX_EDITS,
         ]);
-
-        // Generate MAC for integrity
         $review->generateMac();
-
-        // Generate ECC signature
         $review->generateSignature();
-
-        // Persist MAC/signature metadata
         $review->save();
 
-        // Update user activity
-        $userActivity->decrement('remaining_reviews');
-
-        // If last review, set cooldown
-        if ($userActivity->remaining_reviews === 0) {
-            $userActivity->update([
-                'cooldown_end_time' => now()->addHours(24),
-                'remaining_reviews' => 5,
-            ]);
+        $activity->decrement('remaining_reviews');
+        $activity->update(['last_post_time' => now()]);
+        if ($activity->fresh()->remaining_reviews <= 0) {
+            $activity->update(['cooldown_end_time' => now()->addHours(24), 'remaining_reviews' => 0]);
         }
 
-        $message = $queueStatus === 'wait'
-            ? 'The pending review queue is full. Your review has been queued and will be considered once space is available.'
-            : 'Review submitted and pending approval.';
+        AuditLogger::log('review.submitted', $review, ['status' => $queueStatus]);
 
-        return redirect('/reviews')->with('status', $message);
+        return redirect('/reviews')->with('status', $queueStatus === 'wait'
+            ? 'The moderation queue is full (' . self::MAX_PENDING . ' pending). Your review is waitlisted and will move up automatically.'
+            : 'Review submitted and waiting for moderator approval.');
     }
 
     public function edit(Request $request, $id)
     {
-        $user = $request->attributes->get('auth_user');
-        $review = Review::where('review_id', $id)
-            ->where('user_id', $user->user_id)
-            ->firstOrFail();
+        $review = $this->ownedReview($request, (int) $id);
 
-        if (!$review->verifyIntegrity()) {
-            abort(403, 'Review integrity verification failed.');
+        if ($guard = $this->editGuard($review)) {
+            return redirect('/reviews')->withErrors(['general' => $guard]);
         }
 
-        if ($review->edit_count >= $review->max_edit_limit) {
-            abort(403, 'Maximum edit limit reached for this review.');
-        }
-
-        if ($review->status !== 'approved') {
-            abort(403, 'Only approved reviews can be edited.');
-        }
-
-        return view('reviews.edit', ['review' => $review, 'districts' => $this->districts]);
+        return view('reviews.edit', ['review' => $review]);
     }
 
     public function update(Request $request, $id)
     {
-        $user = $request->attributes->get('auth_user');
-        $review = Review::where('review_id', $id)
-            ->where('user_id', $user->user_id)
-            ->firstOrFail();
-
-        if ($review->edit_count >= $review->max_edit_limit) {
-            abort(403, 'Maximum edit limit reached for this review.');
+        $review = $this->ownedReview($request, (int) $id);
+        if ($guard = $this->editGuard($review)) {
+            return redirect('/reviews')->withErrors(['general' => $guard]);
         }
 
-        if ($review->status !== 'approved') {
-            abort(403, 'Only approved reviews can be edited.');
-        }
-
-        $request->validate([
-            'restaurant_name' => 'required|string|max:200',
-            'review_text' => 'required|string|max:1000',
+        $data = $request->validate([
+            'review_text' => 'required|string|min:10|max:1000',
             'review_score' => 'required|integer|min:1|max:10',
-            'location' => 'required|string|max:200',
-            'city' => 'required|string|in:' . implode(',', $this->districts),
+            'location' => 'nullable|string|max:200',
         ]);
 
-        $review->update([
-            'restaurant_name' => $request->input('restaurant_name'),
-            'review_text' => $request->input('review_text'),
-            'review_score' => (int) $request->input('review_score'),
-            'location' => $request->input('location'),
-            'city' => $request->input('city'),
+        $queueStatus = Review::where('status', 'pending')->where('review_id', '!=', $review->review_id)->count() >= self::MAX_PENDING ? 'wait' : 'pending';
+
+        $review->fill([
+            'review_text' => $data['review_text'],
+            'review_score' => (int) $data['review_score'],
+            'location' => $data['location'],
             'edit_count' => $review->edit_count + 1,
-            'status' => 'pending', // Reset to pending on edit
-            'max_edit_limit' => $review->max_edit_limit ?: 3,
+            'status' => $queueStatus,     // edited reviews go back through moderation
         ]);
-
-        // Regenerate MAC
+        $review->updated_at = now();
         $review->generateMac();
-
-        // Regenerate ECC signature
         $review->generateSignature();
-
-        // Persist regenerated integrity metadata
         $review->save();
 
-        return redirect('/dashboard')->with('status', 'Review updated.');
+        \App\Models\PostedReview::where('review_id', $review->review_id)->delete();
+        if ($review->restaurant) {
+            \App\Services\TrustScoreService::recalculate($review->restaurant);
+        }
+        AuditLogger::log('review.edited', $review, ['edit_count' => $review->edit_count]);
+
+        return redirect('/reviews')->with('status', 'Review updated and sent back for moderation (' . ($review->max_edit_limit - $review->edit_count) . ' edit(s) left).');
     }
 
-    public function show($id)
+    public function show(Request $request, $id)
     {
+        $user = $request->attributes->get('auth_user');
         $review = Review::findOrFail($id);
+        abort_unless($review->status === 'approved' || $review->user_id === $user->user_id || $user->isAdmin(), 404);
 
-        if ($review->status !== 'approved' && !auth()->check()) {
-            abort(403);
-        }
-
-        return view('reviews.show', ['review' => $review]);
-    }
-    // Admin functions
-    /**
-     * Returns the list of pending reviews for admin review.
-     * Only administrators can access this route.
-     */
-    public function pendingRequests(Request $request)
-    {
-        $admin = $request->attributes->get('auth_user');
-
-        if (!$admin->isAdmin()) {
-            abort(403, 'Admin access required.');
-        }
-
-        $pendingRequests = Review::with('user')
-            ->where('status', 'pending')
-            ->latest()
-            ->limit(20)
-            ->get();
-
-        return view('admin.pending_requests', compact('pendingRequests'));
+        return view('reviews.show', ['review' => $review, 'integrity' => $review->verifyIntegrity()]);
     }
 
     public function allApproved(Request $request)
     {
-        $reviews = Review::where('status', 'approved')->latest()->get();
+        $reviews = Review::with('restaurant')->where('status', 'approved')->orderByDesc('review_id')->paginate(15);
+        $integrity = [];
+        foreach ($reviews as $review) {
+            $integrity[$review->review_id] = $review->verifyIntegrity();
+        }
 
-        return view('user.reviews', compact('reviews'));
+        return view('reviews.all', compact('reviews', 'integrity'));
+    }
+
+    private function ownedReview(Request $request, int $id): Review
+    {
+        $user = $request->attributes->get('auth_user');
+
+        return Review::where('review_id', $id)->where('user_id', $user->user_id)->firstOrFail();
+    }
+
+    private function editGuard(Review $review): ?string
+    {
+        if (! $review->verifyIntegrity()) {
+            return 'This review failed its integrity check and cannot be edited.';
+        }
+        if ($review->edit_count >= ($review->max_edit_limit ?: self::MAX_EDITS)) {
+            return 'You have reached the maximum of ' . self::MAX_EDITS . ' edits for this review.';
+        }
+        if ($review->status === 'rejected') {
+            return 'Rejected reviews cannot be edited.';
+        }
+
+        return null;
     }
 }

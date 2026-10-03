@@ -18,6 +18,14 @@ return [
         'key' => env('POSTMARK_API_KEY'),
     ],
 
+    'google_maps' => [
+        'key' => env('GOOGLE_MAPS_API_KEY'),
+    ],
+
+    'tesseract' => [
+        'path' => env('TESSERACT_PATH'),
+    ],
+
     'resend' => [
         'key' => env('RESEND_API_KEY'),
     ],

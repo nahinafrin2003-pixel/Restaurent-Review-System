@@ -3,114 +3,159 @@
 namespace App\Http\Controllers;
 
 use App\Models\AdminAction;
+use App\Models\AuditLog;
+use App\Models\Complaint;
 use App\Models\PostedReview;
+use App\Models\Restaurant;
 use App\Models\Review;
-use Illuminate\Database\Facades\DB;
+use App\Models\SessionTable;
+use App\Models\User;
+use App\Services\AuditLogger;
+use App\Services\Crypto\KeyManager;
+use App\Services\TrustScoreService;
+use App\Support\ComplaintStatus;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 
 class AdminController extends Controller
 {
-    public function approvReview(Request $request, $reviewId)
+    public const MAX_PENDING = 10;
+
+    public function dashboard(Request $request)
     {
-        $admin = $request->attributes->get('auth_user');
-
-        if (!$admin->isAdmin()) {
-            abort(403, 'Admin access required.');
-        }
-
-        $review = Review::findOrFail($reviewId);
-
-        // Check admin limit
-        DB::transaction(function () use ($review, $admin) {
-            if ($review->status !== 'approved') {
-                $review->update(['status' => 'approved']);
-            }
-
-            // Create posted review only once for approved reviews
-            PostedReview::createFromReview($review);
-
-            // Log admin action
-            AdminAction::create([
-                'admin_id' => $admin->user_id,
-                'review_id' => $review->review_id,
-                'status' => 'approved',
-                'action_time' => now(),
-            ]);
-        });
-
-        // Fill any freed pending slots from the wait queue
-        $pendingCount = Review::where('status', 'pending')->count();
-        if ($pendingCount < 10) {
-            Review::where('status', 'wait')
-                ->orderBy('created_at')
-                ->limit(10 - $pendingCount)
-                ->update(['status' => 'pending']);
-        }
-
-        return back()->with('status', 'Review approved.');
+        return view('admin.dashboard', [
+            'pendingReviews' => Review::where('status', 'pending')->orderBy('created_at')->limit(10)->get(),
+            'counts' => [
+                'pending' => Review::where('status', 'pending')->count(),
+                'wait' => Review::where('status', 'wait')->count(),
+                'approved' => Review::where('status', 'approved')->count(),
+                'rejected' => Review::where('status', 'rejected')->count(),
+                'customers' => User::whereIn('role', ['customer', 'user'])->count(),
+                'officers' => User::where('role', 'officer')->count(),
+                'active_officers' => User::where('role', 'officer')->where('is_active', true)->count(),
+                'open_complaints' => Complaint::whereIn('status', ComplaintStatus::OPEN_STATES)->count(),
+                'restaurants' => Restaurant::count(),
+                'sessions' => SessionTable::where('expiry_time', '>', now())->count(),
+            ],
+            'recentAudit' => AuditLog::with('user')->latest('created_at')->limit(8)->get(),
+        ]);
     }
 
-    /**
-     * Handles admin rejection of a review.
-     * Updates review status to rejected, removes any posted review copy,
-     * logs the admin action, notifies the user by email, and refills the pending queue.
-     */
+    public function pendingRequests(Request $request)
+    {
+        return view('admin.pending_requests', [
+            'pendingRequests' => Review::with('user')->where('status', 'pending')->orderBy('created_at')->get(),
+            'waiting' => Review::with('user')->where('status', 'wait')->orderBy('created_at')->get(),
+            'max' => self::MAX_PENDING,
+        ]);
+    }
+
+    public function approveReview(Request $request, $reviewId)
+    {
+        return $this->moderate($request, (int) $reviewId, 'approved');
+    }
+
     public function rejectReview(Request $request, $reviewId)
     {
+        return $this->moderate($request, (int) $reviewId, 'rejected');
+    }
+
+    private function moderate(Request $request, int $reviewId, string $decision)
+    {
         $admin = $request->attributes->get('auth_user');
-
-        if (!$admin->isAdmin()) {
-            abort(403, 'Admin access required.');
-        }
-
         $review = Review::findOrFail($reviewId);
 
-        DB::transaction(function () use ($review, $admin) {
-            // Reject review
-            $review->update(['status' => 'rejected']);
+        if (! in_array($review->status, ['pending', 'wait'], true)) {
+            return back()->withErrors(['review' => 'This review has already been moderated.']);
+        }
 
-            // Remove any previously posted version when the review is rejected
-            PostedReview::where('review_id', $review->review_id)->delete();
+        if (! $review->verifyIntegrity()) {
+            AuditLogger::log('review.integrity_failed', $review);
 
-            // Log admin action
+            return back()->withErrors(['review' => 'Review #' . $review->review_id . ' failed its integrity check (HMAC/ECC) and cannot be approved.']);
+        }
+
+        DB::transaction(function () use ($review, $admin, $decision) {
+            $review->update(['status' => $decision]);
+
+            if ($decision === 'approved') {
+                PostedReview::createFromReview($review);
+            } else {
+                PostedReview::where('review_id', $review->review_id)->delete();
+            }
+
             AdminAction::create([
                 'admin_id' => $admin->user_id,
                 'review_id' => $review->review_id,
-                'status' => 'rejected',
+                'status' => $decision,
                 'action_time' => now(),
             ]);
         });
 
-        // Send notification email to user
-        $user = $review->user;
-        if ($user) {
-            $email = $user->email; // This will decrypt
-            Mail::raw('Your review has been rejected by the admin.', function ($message) use ($email) {
-                $message->to($email)->subject('Review Rejected Notification');
-            });
+        AuditLogger::log('review.' . $decision, $review, ['review_id' => $review->review_id]);
+
+        if ($review->restaurant_id && ($restaurant = Restaurant::find($review->restaurant_id))) {
+            TrustScoreService::recalculate($restaurant);
         }
 
-        // Fill any freed pending slots from the wait queue
-        $pendingCount = Review::where('status', 'pending')->count();
-        if ($pendingCount < 10) {
-            Review::where('status', 'wait')
-                ->orderBy('created_at')
-                ->limit(10 - $pendingCount)
-                ->update(['status' => 'pending']);
+        try {
+            if (($email = $review->user?->email) && ! str_ends_with($email, '.test')) {
+                Mail::raw(
+                    "Your review of {$review->restaurant_name} has been {$decision} by the moderator.",
+                    fn ($m) => $m->to($email)->subject('Review ' . ucfirst($decision))
+                );
+            }
+        } catch (\Throwable $e) {
+            \Log::warning('Review moderation mail failed: ' . $e->getMessage());
         }
 
-        return back()->with('status', 'Review rejected.');
+        $this->promoteWaitlist();
+
+        return back()->with('status', 'Review ' . $decision . '.');
+    }
+
+    /** Moves waitlisted reviews into the pending queue while there is room (cap = 10). */
+    private function promoteWaitlist(): void
+    {
+        $room = self::MAX_PENDING - Review::where('status', 'pending')->count();
+        if ($room > 0) {
+            Review::where('status', 'wait')->orderBy('created_at')->limit($room)->get()
+                ->each(fn ($r) => $r->update(['status' => 'pending']));
+        }
+    }
+
+    public function reviewActions(Request $request)
+    {
+        return view('admin.review_actions', [
+            'actions' => AdminAction::with(['admin', 'review'])->latest('action_time')->paginate(25),
+        ]);
+    }
+
+    public function audit(Request $request)
+    {
+        $query = AuditLog::with('user')->latest('created_at');
+        if ($action = $request->query('action')) {
+            $query->where('action', 'like', $action . '%');
+        }
+
+        return view('admin.audit', [
+            'logs' => $query->paginate(40)->withQueryString(),
+            'groups' => ['auth', 'complaint', 'evidence', 'report', 'review', 'admin', 'restaurant', 'keys'],
+        ]);
     }
 
     public function keyManagement(Request $request)
     {
-        $admin = $request->attributes->get('auth_user');
+        return view('admin.keys', ['keys' => app(KeyManager::class)->activeKeySummary()]);
+    }
 
-        if (!$admin->isAdmin()) {
-            abort(403, 'Admin access required.');
-        }
+    public function rotateKeys(Request $request)
+    {
+        @set_time_limit(600);
+        app(KeyManager::class)->rotateKeys();
+        AuditLogger::log('keys.rotated');
 
-        return view('admin.keys');
+        return back()->with('status', 'New RSA-2048 and secp256k1 key pairs generated. Existing data remains readable with the rotated keys.');
     }
 }

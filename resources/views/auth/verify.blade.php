@@ -1,85 +1,44 @@
 @extends('layouts.auth')
-
+@section('title', 'Two-factor verification')
 @section('content')
-    <div style="margin-bottom: 20px; text-align: right;">
-        <a href="/login" class="button secondary" style="font-size: 14px; padding: 8px 16px;">← Back to Login</a>
-    </div>
-    <h1>Two-Factor Verification</h1>
-    <p>Please enter the verification code sent to <strong>{{ $verificationEmail }}</strong>.</p>
+    <h1>Check your e-mail</h1>
+    <p>We sent a 6-digit code to <strong>{{ $verificationEmail }}</strong>. It expires 60 seconds after it was sent.</p>
+    <p id="otp-timer" class="small" style="font-weight:600"></p>
 
-    <p id="otp-delivery-timer" style="margin-bottom: 14px; font-weight: 600;"></p>
-
-    <form method="POST" action="/verify-2fa" id="verify-form" onsubmit="showSpinner();">
+    <form method="POST" action="/verify-2fa" onsubmit="document.getElementById('vbtn').disabled=true">
         @csrf
         <div class="field">
-            <label for="verification_code">Verification Code</label>
-            <input type="text" id="verification_code" name="verification_code" required>
-            @error('verification_code')
-                <p class="error" style="margin-top: 8px; background:none; border:none; color:#b91c1c;">{{ $message }}</p>
-            @enderror
+            <label for="verification_code">Verification code</label>
+            <input type="text" id="verification_code" name="verification_code" class="otp-input" inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" required autofocus>
         </div>
-        <button type="submit" class="button" id="verify-button">Verify</button>
-        <span id="verify-spinner" style="display:none; margin-left: 12px; color:#2563eb;">Verifying...</span>
+        <button type="submit" class="btn block" id="vbtn">Verify &amp; sign in</button>
     </form>
 
-    <div style="margin-top: 24px;">
-        <form method="POST" action="/resend-2fa" id="resend-form" style="display: none;">
-            @csrf
-            <button type="submit" id="resend-button" class="button">Resend code</button>
-        </form>
-    </div>
+    <form method="POST" action="/resend-2fa" id="resend-form" style="margin-top:12px; display:none">
+        @csrf
+        <button type="submit" class="btn ghost block">Send a new code</button>
+    </form>
+    <p class="small" style="margin-top:14px"><a href="/login">← Use a different account</a></p>
 
+    @push('scripts')
     <script>
-        function showSpinner() {
-            document.getElementById('verify-button').disabled = true;
-            document.getElementById('verify-spinner').style.display = 'inline';
-        }
-
-        (function() {
-            var timerElement = document.getElementById('otp-delivery-timer');
-            if (!timerElement) {
-                return;
-            }
-
-            var seconds = {{ $timeRemaining ?? 0 }};
-            var hasWrongOtp = {{ $errors->has('verification_code') ? 'true' : 'false' }};
-            var showResend = {{ $showResend ? 'true' : 'false' }};
-            var resendForm = document.getElementById('resend-form');
-
-            function formatTime(value) {
-                var mins = Math.floor(value / 60).toString().padStart(2, '0');
-                var secs = (value % 60).toString().padStart(2, '0');
-                return mins + ':' + secs;
-            }
-
-            function showResendButton() {
-                if (resendForm) {
-                    resendForm.style.display = 'block';
-                }
-            }
-
-            function updateDeliveryTimer() {
+        (function () {
+            var seconds = {{ (int) $timeRemaining }};
+            var el = document.getElementById('otp-timer');
+            var resend = document.getElementById('resend-form');
+            function tick() {
                 if (seconds <= 0) {
-                    timerElement.textContent = 'OTP has expired. Resend code is available now.';
-                    showResendButton();
+                    el.textContent = 'Your code has expired — request a new one below.';
+                    el.style.color = '#b42318';
+                    resend.style.display = 'block';
                     return;
                 }
-
-                var message = 'OTP expires in ' + formatTime(seconds) + '.';
-                if (hasWrongOtp) {
-                    message += ' Wrong OTP entered. Please try again.';
-                }
-
-                timerElement.textContent = message;
-                seconds -= 1;
-                setTimeout(updateDeliveryTimer, 1000);
+                el.textContent = 'Code expires in 0:' + String(seconds).padStart(2, '0');
+                seconds--;
+                setTimeout(tick, 1000);
             }
-
-            if (showResend && seconds <= 0) {
-                showResendButton();
-            }
-
-            updateDeliveryTimer();
+            tick();
         })();
     </script>
+    @endpush
 @endsection

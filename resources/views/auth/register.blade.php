@@ -1,52 +1,37 @@
 @extends('layouts.auth')
-
+@section('title', 'Register')
 @section('content')
-    <h1>🚀 Create Account</h1>
-    @if(session('status'))
-        <div class="flash" style="margin-bottom: 20px;">{{ session('status') }}</div>
-    @endif
-    <form method="POST" action="/register">
+    <h1>Create your account</h1>
+    <p>Customers can review restaurants and file consumer complaints. Your e-mail, phone and username are encrypted at rest.</p>
+    <form method="POST" action="/register" onsubmit="this.querySelector('button').disabled=true">
         @csrf
         <div class="field">
-            <label for="username">👤 Username <span style="color: #4CAF50;">(10 chars, letters + numbers + symbols)</span></label>
-            <input type="text" id="username" name="username" value="{{ old('username') }}" placeholder="e.g., John@123" maxlength="10" required>
-            @error('username')
-                <p class="error" style="margin-top: 8px; background:none; border:none; color:#b91c1c;">{{ $message }}</p>
-            @enderror
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" value="{{ old('username') }}" maxlength="10" minlength="10" placeholder="e.g. Rahim@2026" required>
+            <div class="hint">Exactly 10 characters with letters, numbers and a symbol.</div>
         </div>
         <div class="field">
-            <label for="email">📧 Email</label>
-            <input type="email" id="email" name="email" value="{{ old('email') }}" placeholder="Enter your email" required>
-            @error('email')
-                <p class="error" style="margin-top: 8px; background:none; border:none; color:#b91c1c;">{{ $message }}</p>
-            @enderror
+            <label for="email">E-mail</label>
+            <input type="email" id="email" name="email" value="{{ old('email') }}" required>
         </div>
         <div class="field">
-            <label for="contact_info">📱 Phone Number</label>
-            <input type="text" id="contact_info" name="contact_info" value="{{ old('contact_info') }}" placeholder="12 digits" required>
-            @error('contact_info')
-                <p class="error" style="margin-top: 8px; background:none; border:none; color:#b91c1c;">{{ $message }}</p>
-            @enderror
+            <label for="contact_info">Mobile number</label>
+            <input type="text" id="contact_info" name="contact_info" value="{{ old('contact_info') }}" inputmode="numeric" pattern="\d{11}" maxlength="11" placeholder="01XXXXXXXXX" required>
+            <div class="hint">11 digits.</div>
         </div>
-        <div class="field">
-            <label for="password">🔐 Password <span style="color: #4CAF50;">(minimum 12 characters)</span></label>
-            <input type="password" id="password" name="password" placeholder="Enter a strong password" minlength="12" required>
-            @error('password')
-                <p class="error" style="margin-top: 8px; background:none; border:none; color:#b91c1c;">{{ $message }}</p>
-            @enderror
+        <div class="form-grid">
+            <div class="field">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" minlength="12" autocomplete="new-password" required>
+                <div class="hint">At least 12 characters.</div>
+            </div>
+            <div class="field">
+                <label for="password_confirmation">Confirm password</label>
+                <input type="password" id="password_confirmation" name="password_confirmation" minlength="12" autocomplete="new-password" required>
+            </div>
         </div>
-        <div class="field">
-            <label for="role">👥 Role</label>
-            <select id="role" name="role" required>
-                <option value="">-- Select your role --</option>
-                <option value="user" {{ old('role') === 'user' ? 'selected' : '' }}>👨‍💼 User (Reviewer)</option>
-                <option value="admin" {{ old('role') === 'admin' ? 'selected' : '' }}>⚙️ Admin (Moderator)</option>
-            </select>
-            @error('role')
-                <p class="error" style="margin-top: 8px; background:none; border:none; color:#b91c1c;">{{ $message }}</p>
-            @enderror
-        </div>
-        <button type="submit" class="button">✨ Register</button>
+        <button type="submit" class="btn block">Create account</button>
     </form>
-    <p>Already registered? <a href="/login">Login now</a></p>
+    <hr>
+    <p class="small">Already registered? <a href="/login">Log in</a></p>
 @endsection

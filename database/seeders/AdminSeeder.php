@@ -5,37 +5,36 @@ namespace Database\Seeders;
 use App\Models\AdminLimit;
 use App\Models\User;
 use App\Models\UserActivity;
+use App\Services\Crypto\KeyManager;
 use Illuminate\Database\Seeder;
 
 class AdminSeeder extends Seeder
 {
+    public const EMAIL = 'nahin.afrin@g.bracu.ac.bd';
+    public const PASSWORD = 'AdminPassword123';
+
     public function run(): void
     {
-        // Create admin user
+        app(KeyManager::class)->ensureKeysExist();
+
+        if (User::findByEmail(self::EMAIL)) {
+            $this->command?->info('Admin already exists — skipped.');
+
+            return;
+        }
+
         $admin = User::create([
             'username' => 'admin',
-            'email' => 'nahin.afrin@g.bracu.ac.bd',
+            'email' => self::EMAIL,
             'contact_info' => '01234567890',
-            'password' => 'AdminPassword123',
+            'password' => self::PASSWORD,
             'role' => 'admin',
+            'is_active' => true,
         ]);
 
-        // Create admin limit record
-        AdminLimit::create([
-            'admin_id' => $admin->user_id,
-            'current_pending_count' => 0,
-            'max_pending_limit' => 5,
-            'status' => 'active',
-        ]);
+        AdminLimit::create(['admin_id' => $admin->user_id, 'current_pending_count' => 0, 'max_pending_limit' => 10, 'status' => 'active']);
+        UserActivity::create(['user_id' => $admin->user_id, 'remaining_reviews' => 5]);
 
-        // Create user activity record for admin
-        UserActivity::create([
-            'user_id' => $admin->user_id,
-            'remaining_reviews' => 5,
-        ]);
-
-        $this->command->info('Admin user created successfully!');
-        $this->command->info('Email: nahin.afrin@g.bracu.ac.bd');
-        $this->command->info('Password: AdminPassword123');
+        $this->command?->info('Admin: ' . self::EMAIL . ' / ' . self::PASSWORD);
     }
 }

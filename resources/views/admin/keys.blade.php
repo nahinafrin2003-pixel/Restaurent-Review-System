@@ -1,22 +1,16 @@
 @extends('layouts.app')
-
+@section('title', 'Key management')
 @section('content')
-    <div style="margin-bottom: 20px;">
-        <a href="/dashboard" class="button secondary">Back to Dashboard</a>
+    <div class="page-head">
+        <div><h1>Key management</h1><p class="sub">RSA-2048 (OAEP) protects PII and complaint/review text; secp256k1 signs records and encrypts messages (EC-ElGamal). Rotated keys stay available for decryption and signature checks.</p></div>
+        <form method="POST" action="/admin/keys/rotate" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Generating primes…'">@csrf<button class="btn accent">Rotate keys</button></form>
     </div>
-    <h1>Key Management</h1>
-    <p>Active keys are encrypted in the database. Rotating keys generates fresh RSA and ECC key material.</p>
-    <form method="POST" action="/admin/keys/rotate">
-        @csrf
-        <button type="submit" class="button">Rotate Keys</button>
-    </form>
-
-    <h2 style="margin-top: 20px;">Stored Key Records</h2>
-    <ul>
-        @foreach($keys as $key)
-            <li>
-                <strong>{{ strtoupper($key->algorithm) }} ({{ $key->purpose }})</strong> — created at {{ $key->created_at->format('Y-m-d H:i:s') }} — active: {{ $key->active ? 'yes' : 'no' }}
-            </li>
+    <div class="table-wrap"><table>
+        <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Created</th><th>Public-key fingerprint (SHA-256)</th></tr></thead>
+        <tbody>
+        @foreach($keys as $k)
+            <tr><td>#{{ $k['id'] }}</td><td>{{ $k['type'] }}</td><td><span class="badge {{ $k['status'] === 'active' ? 'good' : '' }}">{{ $k['status'] }}</span></td><td class="small">{{ optional($k['created_at'])->format('d M Y H:i') }}</td><td class="mono">{{ $k['fingerprint'] }}</td></tr>
         @endforeach
-    </ul>
+        </tbody>
+    </table></div>
 @endsection

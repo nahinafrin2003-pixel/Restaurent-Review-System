@@ -2,131 +2,152 @@
 
 namespace App\Services\Crypto;
 
-use App\Services\Crypto\BigInteger;
-
+/**
+ * From-scratch SHA-256 (FIPS 180-4).
+ *
+ * No calls to hash()/openssl/sodium — every round of the compression
+ * function is implemented here with native 64-bit integer arithmetic
+ * masked to 32 bits. Supports one-shot hashing and streaming (for files).
+ */
 class SHA256
 {
-    private static $k = [
-        '428a2f98', '71374491', 'b5c0fbcf', 'e9b5dba5', '3956c25b', '59f111f1', '923f82a4', 'ab1c5ed5',
-        'd807aa98', '12835b01', '243185be', '550c7dc3', '72be5d74', '80deb1fe', '9bdc06a7', 'c19bf174',
-        'e49b69c1', 'efbe4786', '0fc19dc6', '240ca1cc', '2de92c6f', '4a7484aa', '5cb0a9dc', '76f988da',
-        '983e5152', 'a831c66d', 'b00327c8', 'bf597fc7', 'c6e00bf3', 'd5a79147', '06ca6351', '14292967',
-        '27b70a85', '2e1b2138', '4d2c6dfc', '53380d13', '650a7354', '766a0abb', '81c2c92e', '92722c85',
-        'a2bfe8a1', 'a81a664b', 'c24b8b70', 'c76c51a3', 'd192e819', 'd6990624', 'f40e3585', '106aa070',
-        '19a4c116', '1e376c08', '2748774c', '34b0bcb5', '391c0cb3', '4ed8aa4a', '5b9cca4f', '682e6ff3',
-        '748f82ee', '78a5636f', '84c87814', '8cc70208', '90befffa', 'a4506ceb', 'bef9a3f7', 'c67178f2'
+    private const K = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
     ];
 
-    private static $h = [
-        '6a09e667', 'bb67ae85', '3c6ef372', 'a54ff53a', '510e527f', '9b05688c', '1f83d9ab', '5be0cd19'
+    private const H0 = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
     ];
 
+    private array $state;
+    private string $buffer = '';
+    private int $length = 0;
+
+    public function __construct()
+    {
+        $this->state = self::H0;
+    }
+
+    /** Hex digest of a message. */
     public static function hash(string $message): string
     {
-        $message = self::preprocess($message);
-        $chunks = str_split($message, 64); // 512 bits
+        return bin2hex(self::raw($message));
+    }
 
-        $h = array_map(fn($x) => BigInteger::fromHex($x), self::$h);
+    /** Raw 32-byte digest of a message. */
+    public static function raw(string $message): string
+    {
+        $ctx = new self();
+        $ctx->update($message);
 
-        foreach ($chunks as $chunk) {
-            $w = self::schedule($chunk);
-            $a = $h[0]; $b = $h[1]; $c = $h[2]; $d = $h[3];
-            $e = $h[4]; $f = $h[5]; $g = $h[6]; $h_val = $h[7];
+        return $ctx->finalRaw();
+    }
 
-            for ($i = 0; $i < 64; $i++) {
-                $s1 = BigInteger::bitwiseXor(BigInteger::bitwiseXor(self::rightRotate($e, 6), self::rightRotate($e, 11)), self::rightRotate($e, 25));
-                $ch = BigInteger::bitwiseXor(BigInteger::bitwiseAnd($e, $f), BigInteger::bitwiseAnd(BigInteger::bitwiseNot($e), $g));
-                $temp1 = self::toWord(BigInteger::add(BigInteger::add(BigInteger::add($h_val, $s1), $ch), BigInteger::add(BigInteger::fromHex(self::$k[$i]), $w[$i])));
-                $s0 = BigInteger::bitwiseXor(BigInteger::bitwiseXor(self::rightRotate($a, 2), self::rightRotate($a, 13)), self::rightRotate($a, 22));
-                $maj = BigInteger::bitwiseXor(BigInteger::bitwiseXor(BigInteger::bitwiseAnd($a, $b), BigInteger::bitwiseAnd($a, $c)), BigInteger::bitwiseAnd($b, $c));
-                $temp2 = self::toWord(BigInteger::add($s0, $maj));
-
-                $h_val = $g;
-                $g = $f;
-                $f = $e;
-                $e = self::toWord(BigInteger::add($d, $temp1));
-                $d = $c;
-                $c = $b;
-                $b = $a;
-                $a = self::toWord(BigInteger::add($temp1, $temp2));
+    /** Hex digest of a file, streamed in 64 KiB chunks. */
+    public static function file(string $path): string
+    {
+        $ctx = new self();
+        $fh = fopen($path, 'rb');
+        if ($fh === false) {
+            throw new \RuntimeException("Cannot open {$path} for hashing.");
+        }
+        while (! feof($fh)) {
+            $chunk = fread($fh, 65536);
+            if ($chunk === false) {
+                break;
             }
-
-            $h[0] = self::toWord(BigInteger::add($h[0], $a));
-            $h[1] = self::toWord(BigInteger::add($h[1], $b));
-            $h[2] = self::toWord(BigInteger::add($h[2], $c));
-            $h[3] = self::toWord(BigInteger::add($h[3], $d));
-            $h[4] = self::toWord(BigInteger::add($h[4], $e));
-            $h[5] = self::toWord(BigInteger::add($h[5], $f));
-            $h[6] = self::toWord(BigInteger::add($h[6], $g));
-            $h[7] = self::toWord(BigInteger::add($h[7], $h_val));
+            $ctx->update($chunk);
         }
+        fclose($fh);
 
-        $result = '';
-        foreach ($h as $val) {
-            $result .= str_pad(BigInteger::toHex($val), 8, '0', STR_PAD_LEFT);
-        }
-
-        return $result;
+        return bin2hex($ctx->finalRaw());
     }
 
-    private static function preprocess(string $message): string
+    public function update(string $data): void
     {
-        $len = strlen($message) * 8;
-        $message .= chr(0x80);
-        while ((strlen($message) % 64) !== 56) {
-            $message .= chr(0x00);
+        $this->length += strlen($data);
+        $this->buffer .= $data;
+        $blocks = intdiv(strlen($this->buffer), 64);
+        for ($i = 0; $i < $blocks; $i++) {
+            $this->compress(substr($this->buffer, $i * 64, 64));
         }
-        $lenHex = str_pad(dechex($len), 16, '0', STR_PAD_LEFT);
-        for ($i = 0; $i < 16; $i += 2) {
-            $message .= chr(hexdec(substr($lenHex, $i, 2)));
-        }
-        return $message;
+        $this->buffer = (string) substr($this->buffer, $blocks * 64);
     }
 
-    private static function schedule(string $chunk): array
+    public function finalRaw(): string
     {
-        $w = [];
-        for ($i = 0; $i < 16; $i++) {
-            $w[$i] = BigInteger::fromHex(bin2hex(substr($chunk, $i*4, 4)));
+        $bitLen = $this->length * 8;
+        $pad = "\x80" . str_repeat("\x00", (55 - $this->length % 64 + 64) % 64);
+        // 64-bit big-endian length
+        $lenBytes = '';
+        for ($i = 7; $i >= 0; $i--) {
+            $lenBytes .= chr(($bitLen >> ($i * 8)) & 0xff);
         }
+        $tail = $this->buffer . $pad . $lenBytes;
+        for ($i = 0; $i < strlen($tail); $i += 64) {
+            $this->compress(substr($tail, $i, 64));
+        }
+
+        $out = '';
+        foreach ($this->state as $word) {
+            $out .= chr(($word >> 24) & 0xff) . chr(($word >> 16) & 0xff) . chr(($word >> 8) & 0xff) . chr($word & 0xff);
+        }
+
+        return $out;
+    }
+
+    private function compress(string $block): void
+    {
+        $w = array_values(unpack('N16', $block));
+        $k = self::K;
+
         for ($i = 16; $i < 64; $i++) {
-            $s0 = BigInteger::bitwiseXor(BigInteger::bitwiseXor(self::rightRotate($w[$i-15], 7), self::rightRotate($w[$i-15], 18)), self::rightShift($w[$i-15], 3));
-            $s1 = BigInteger::bitwiseXor(BigInteger::bitwiseXor(self::rightRotate($w[$i-2], 17), self::rightRotate($w[$i-2], 19)), self::rightShift($w[$i-2], 10));
-            $w[$i] = self::toWord(BigInteger::add(BigInteger::add(BigInteger::add($w[$i-16], $s0), $w[$i-7]), $s1));
+            $x = $w[$i - 15];
+            $y = $w[$i - 2];
+            $s0 = (self::rotr($x, 7) ^ self::rotr($x, 18) ^ ($x >> 3));
+            $s1 = (self::rotr($y, 17) ^ self::rotr($y, 19) ^ ($y >> 10));
+            $w[$i] = ($w[$i - 16] + $s0 + $w[$i - 7] + $s1) & 0xffffffff;
         }
-        return $w;
+
+        [$a, $b, $c, $d, $e, $f, $g, $h] = $this->state;
+
+        for ($i = 0; $i < 64; $i++) {
+            $S1 = self::rotr($e, 6) ^ self::rotr($e, 11) ^ self::rotr($e, 25);
+            $ch = ($e & $f) ^ ((~$e & 0xffffffff) & $g);
+            $t1 = ($h + $S1 + $ch + $k[$i] + $w[$i]) & 0xffffffff;
+            $S0 = self::rotr($a, 2) ^ self::rotr($a, 13) ^ self::rotr($a, 22);
+            $maj = ($a & $b) ^ ($a & $c) ^ ($b & $c);
+            $t2 = ($S0 + $maj) & 0xffffffff;
+
+            $h = $g;
+            $g = $f;
+            $f = $e;
+            $e = ($d + $t1) & 0xffffffff;
+            $d = $c;
+            $c = $b;
+            $b = $a;
+            $a = ($t1 + $t2) & 0xffffffff;
+        }
+
+        $this->state[0] = ($this->state[0] + $a) & 0xffffffff;
+        $this->state[1] = ($this->state[1] + $b) & 0xffffffff;
+        $this->state[2] = ($this->state[2] + $c) & 0xffffffff;
+        $this->state[3] = ($this->state[3] + $d) & 0xffffffff;
+        $this->state[4] = ($this->state[4] + $e) & 0xffffffff;
+        $this->state[5] = ($this->state[5] + $f) & 0xffffffff;
+        $this->state[6] = ($this->state[6] + $g) & 0xffffffff;
+        $this->state[7] = ($this->state[7] + $h) & 0xffffffff;
     }
 
-    private static function toWord(mixed $value): mixed
+    private static function rotr(int $x, int $n): int
     {
-        return BigInteger::mod($value, BigInteger::pow2(32));
-    }
-
-    private static function rightRotate(mixed $val, int $bits): mixed
-    {
-        $hex = BigInteger::toHex($val);
-        $hex = preg_replace('/[^0-9a-fA-F]/', '', $hex);
-        if ($hex === '') {
-            $hex = '0';
-        }
-
-        // Ensure even length and use only the lowest 32 bits for SHA-256 words.
-        if (strlen($hex) % 2 !== 0) {
-            $hex = '0' . $hex;
-        }
-
-        if (strlen($hex) > 8) {
-            $hex = substr($hex, -8);
-        }
-
-        $hex = str_pad($hex, 8, '0', STR_PAD_LEFT);
-        $bin = hex2bin($hex);
-        $rotated = substr($bin, -$bits) . substr($bin, 0, -$bits);
-        return BigInteger::fromHex(bin2hex($rotated));
-    }
-
-    private static function rightShift(mixed $val, int $bits): mixed
-    {
-        return BigInteger::div($val, BigInteger::pow2($bits));
+        return (($x >> $n) | ($x << (32 - $n))) & 0xffffffff;
     }
 }

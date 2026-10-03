@@ -25,6 +25,21 @@ class User extends Authenticatable
         'password_hash',
         'password_salt',
         'role',
+        'is_active',
+        'points',
+        'created_by',
+        'deactivated_at',
+    ];
+
+    protected $casts = [
+        'is_active' => 'boolean',
+        'deactivated_at' => 'datetime',
+    ];
+
+    public const ROLES = [
+        'customer' => 'Customer',
+        'officer' => 'Verification Officer',
+        'admin' => 'Admin',
     ];
 
     protected $hidden = [
@@ -87,7 +102,7 @@ class User extends Authenticatable
      */
     public function setUsernameAttribute(string $value): void
     {
-        $this->attributes['username_hash'] = hash('sha256', $value);
+        $this->attributes['username_hash'] = \App\Services\Crypto\SHA256::hash($value);
         $this->attributes['username'] = app(KeyManager::class)->encryptUserField($value);
     }
 
@@ -120,7 +135,7 @@ class User extends Authenticatable
     public function setEmailAttribute(string $value): void
     {
         $normalized = strtolower(trim($value));
-        $this->attributes['email_hash'] = hash('sha256', $normalized);
+        $this->attributes['email_hash'] = \App\Services\Crypto\SHA256::hash($normalized);
         $this->attributes['email'] = app(KeyManager::class)->encryptUserField($normalized);
     }
 
@@ -152,7 +167,7 @@ class User extends Authenticatable
     public function setContactInfoAttribute(string $value): void
     {
         $normalized = self::normalizeContact($value);
-        $this->attributes['contact_hash'] = hash('sha256', $normalized);
+        $this->attributes['contact_hash'] = \App\Services\Crypto\SHA256::hash($normalized);
         $this->attributes['contact_info'] = app(KeyManager::class)->encryptUserField($value);
     }
 
@@ -192,7 +207,7 @@ class User extends Authenticatable
      */
     public static function findByContact(string $contact): ?self
     {
-        return self::where('contact_hash', hash('sha256', self::normalizeContact($contact)))->first();
+        return self::where('contact_hash', \App\Services\Crypto\SHA256::hash(self::normalizeContact($contact)))->first();
     }
 
     /**
@@ -201,7 +216,7 @@ class User extends Authenticatable
      */
     public static function findByEmail(string $email): ?self
     {
-        return self::where('email_hash', hash('sha256', strtolower(trim($email))))->first();
+        return self::where('email_hash', \App\Services\Crypto\SHA256::hash(strtolower(trim($email))))->first();
     }
 
     /**
@@ -210,7 +225,7 @@ class User extends Authenticatable
      */
     public static function findByUsername(string $username): ?self
     {
-        return self::where('username_hash', hash('sha256', $username))->first();
+        return self::where('username_hash', \App\Services\Crypto\SHA256::hash($username))->first();
     }
 
     /**
@@ -249,5 +264,51 @@ class User extends Authenticatable
     public function isAdmin(): bool
     {
         return $this->role === 'admin';
+    }
+
+    public function isOfficer(): bool
+    {
+        return $this->role === 'officer';
+    }
+
+    /** Officers and admins can work the complaint queue. */
+    public function isStaff(): bool
+    {
+        return in_array($this->role, ['officer', 'admin'], true);
+    }
+
+    public function isCustomer(): bool
+    {
+        return in_array($this->role, ['customer', 'user'], true);
+    }
+
+    public function isActive(): bool
+    {
+        return $this->is_active === null || (bool) $this->is_active;
+    }
+
+    public function roleLabel(): string
+    {
+        return self::ROLES[$this->role] ?? ucfirst((string) $this->role);
+    }
+
+    public function complaints()
+    {
+        return $this->hasMany(Complaint::class, 'user_id', 'user_id');
+    }
+
+    public function badges()
+    {
+        return $this->hasMany(UserBadge::class, 'user_id', 'user_id');
+    }
+
+    /** Where this user lands after login. */
+    public function homePath(): string
+    {
+        return match (true) {
+            $this->isAdmin() => '/admin/dashboard',
+            $this->isOfficer() => '/officer',
+            default => '/dashboard',
+        };
     }
 }

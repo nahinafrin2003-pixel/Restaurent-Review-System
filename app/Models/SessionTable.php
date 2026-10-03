@@ -34,7 +34,7 @@ class SessionTable extends Model
 
     protected static function hashToken(string $token): string
     {
-        return hash('sha256', $token);
+        return \App\Services\Crypto\SHA256::hash($token);
     }
 
     public function setTokenAttribute(string $value): void

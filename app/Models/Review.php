@@ -18,6 +18,7 @@ class Review extends Model
     protected $fillable = [
         'user_id',
         'restaurant_name',
+        'restaurant_id',
         'review_text',
         'review_score',
         'location',
@@ -65,87 +66,62 @@ class Review extends Model
         }
 
         try {
-            return app(KeyManager::class)->decryptUserField($encrypted);
+            return app(KeyManager::class)->decrypt($encrypted);
         } catch (\Exception $e) {
             \Log::warning('Review text decryption failed: ' . $e->getMessage());
             return '';
         }
     }
 
+    public function restaurant()
+    {
+        return $this->belongsTo(Restaurant::class, 'restaurant_id');
+    }
+
+    protected function integrityPayload(): string
+    {
+        return json_encode([
+            'review_id' => $this->review_id,
+            'user_id' => $this->user_id,
+            'restaurant_name' => $this->restaurant_name,
+            'review_text' => $this->review_text,
+            'review_score' => $this->review_score,
+            'city' => $this->city,
+        ]);
+    }
+
+    /** HMAC-SHA256 + ECDSA (secp256k1) verification — run on every read. */
     public function verifyIntegrity(): bool
-    {// Verify MAC
-        if (!empty($this->mac)) {
-            $message = json_encode([
-                'review_id' => $this->review_id,
-                'user_id' => $this->user_id,
-                'restaurant_name' => $this->restaurant_name,
-                'review_text' => $this->review_text,
-                'review_score' => $this->review_score,
-                'city' => $this->city,
-            ]);
-            if (!HMAC::verify($message, config('crypto.root_secret'), $this->mac)) {
-                return false;
-            }
+    {
+        $message = $this->integrityPayload();
+        $km = app(KeyManager::class);
+
+        if (! empty($this->mac) && ! HMAC::verify($message, config('crypto.root_secret'), $this->mac)) {
+            return false;
         }
 
-        // Verify ECC signature
-        if (!empty($this->signature)) {
-            $message = json_encode([
-                'review_id' => $this->review_id,
-                'user_id' => $this->user_id,
-                'restaurant_name' => $this->restaurant_name,
-                'review_text' => $this->review_text,
-                'review_score' => $this->review_score,
-                'city' => $this->city,
-            ]);
-
-            $signature = $this->signature;
-            if (is_string($signature)) {
-                $signature = json_decode($signature, true) ?: [];
-            }
-
-            if (!is_array($signature) || !isset($signature['r'], $signature['s'])) {
-                return false;
-            }
-
-            $publicKey = app(KeyManager::class)->getActiveEccPublic();
-            return ECC::verify($message, $signature, $publicKey);
+        if (! empty($this->signature)) {
+            return $km->verify($message, $this->signature);
         }
 
-        return true;
+        return ! empty($this->mac);
     }
 
     public function generateMac(): void
     {
-        $message = json_encode([
-            'review_id' => $this->review_id,
-            'user_id' => $this->user_id,
-            'restaurant_name' => $this->restaurant_name,
-            'review_text' => $this->review_text,
-            'review_score' => $this->review_score,
-            'city' => $this->city,
-        ]);
-
-        $this->mac = HMAC::sign($message, config('crypto.root_secret'));
+        $this->mac = HMAC::sign($this->integrityPayload(), config('crypto.root_secret'));
     }
 
     public function generateSignature(): void
     {
-        $message = json_encode([
-            'review_id' => $this->review_id,
-            'user_id' => $this->user_id,
-            'restaurant_name' => $this->restaurant_name,
-            'review_text' => $this->review_text,
-            'review_score' => $this->review_score,
-            'city' => $this->city,
-        ]);
+        $this->signature = app(KeyManager::class)->sign($this->integrityPayload());
+    }
 
-        $privateKey = app(KeyManager::class)->getActiveEccPrivate();
-
-        if (!$privateKey) {
-            throw new \Exception('ECC private key not available for signing.');
-        }
-
-        $this->signature = ECC::sign($message, $privateKey);
+    public function statusLabel(): string
+    {
+        return match ($this->status) {
+            'wait' => 'Waitlisted',
+            default => ucfirst((string) $this->status),
+        };
     }
 }

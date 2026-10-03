@@ -3,6 +3,8 @@
 namespace App\Services\Crypto\Asymmetric;
 
 use App\Services\Crypto\BigInteger;
+use App\Services\Crypto\HMAC;
+use App\Services\Crypto\SHA256;
 use Exception;
 
 class ECC
@@ -278,7 +280,7 @@ class ECC
     {
         $hashInput = BigInteger::toHex($point['x']) . BigInteger::toHex($point['y']);
 
-        return hash('sha256', $hashInput, true);
+        return SHA256::raw($hashInput);
     }
 
     protected static function xorCipher(string $data, string $key): string
@@ -374,7 +376,7 @@ class ECC
     {
         self::initCurve();
 
-        $hash = hash('sha256', $message, true);
+        $hash = SHA256::raw($message);
         $e = BigInteger::fromBinary($hash);
         $e = BigInteger::mod($e, self::$curve['n']);
 
@@ -408,7 +410,7 @@ class ECC
     {
         self::initCurve();
 
-        $hash = hash('sha256', $message, true);
+        $hash = SHA256::raw($message);
         $e = BigInteger::fromBinary($hash);
         $e = BigInteger::mod($e, self::$curve['n']);
 
@@ -438,5 +440,85 @@ class ECC
         $rPrime = BigInteger::mod($point['x'], self::$curve['n']);
 
         return BigInteger::cmp($r, $rPrime) === 0;
+    }
+
+    /*
+     * ---------------------------------------------------------------
+     * EC-ElGamal hybrid encryption (ECIES-style) for arbitrary-length data
+     * ---------------------------------------------------------------
+     * 1. pick ephemeral k, publish R = kG            (ElGamal "c1")
+     * 2. shared point S = kQ; derive keys from SHA-256(S.x || S.y)
+     * 3. c2 = m XOR keystream(SHA-256 counter mode)  (ElGamal "c2")
+     * 4. tag = HMAC-SHA256(macKey, R || c2)          (authenticity)
+     */
+    public static function seal(string $plaintext, array $publicKey): string
+    {
+        self::initCurve();
+
+        $k = BigInteger::randomBetween('1', BigInteger::sub(self::$curve['n'], '1'));
+        $r = self::scalarMultiply(self::generatorPoint(), $k);
+        $s = self::scalarMultiply(self::pointFromArray($publicKey), $k);
+        [$encKey, $macKey] = self::deriveKeys($s);
+
+        $cipher = $plaintext ^ self::keystream($encKey, strlen($plaintext));
+        $rArr = self::pointToArray($r);
+        $tag = HMAC::sign($rArr['x'] . ':' . $rArr['y'] . ':' . $cipher, $macKey);
+
+        return base64_encode(json_encode([
+            'format' => 'ecies-v1',
+            'r' => $rArr,
+            'c' => base64_encode($cipher),
+            't' => $tag,
+        ]));
+    }
+
+    public static function open(string $ciphertext, string $privateKey): string
+    {
+        self::initCurve();
+
+        $payload = json_decode((string) base64_decode($ciphertext, true), true);
+        if (! is_array($payload) || ($payload['format'] ?? '') !== 'ecies-v1') {
+            throw new Exception('Invalid ECIES ciphertext.');
+        }
+
+        $r = self::pointFromArray($payload['r']);
+        $s = self::scalarMultiply($r, BigInteger::fromHex($privateKey));
+        [$encKey, $macKey] = self::deriveKeys($s);
+        $cipher = base64_decode($payload['c']);
+
+        if (! HMAC::verify($payload['r']['x'] . ':' . $payload['r']['y'] . ':' . $cipher, $macKey, $payload['t'])) {
+            throw new Exception('ECIES authentication tag mismatch (wrong key or tampered data).');
+        }
+
+        return $cipher ^ self::keystream($encKey, strlen($cipher));
+    }
+
+    public static function isSealed(string $value): bool
+    {
+        $decoded = base64_decode($value, true);
+        if ($decoded === false) {
+            return false;
+        }
+        $payload = json_decode($decoded, true);
+
+        return is_array($payload) && ($payload['format'] ?? '') === 'ecies-v1';
+    }
+
+    protected static function deriveKeys(array $sharedPoint): array
+    {
+        $seed = SHA256::raw('ecies|' . BigInteger::toHex($sharedPoint['x']) . '|' . BigInteger::toHex($sharedPoint['y']));
+
+        return [SHA256::raw($seed . "\x01enc"), SHA256::raw($seed . "\x02mac")];
+    }
+
+    protected static function keystream(string $key, int $length): string
+    {
+        $out = '';
+        $counter = 0;
+        while (strlen($out) < $length) {
+            $out .= SHA256::raw($key . pack('N', $counter++));
+        }
+
+        return substr($out, 0, $length);
     }
 }
